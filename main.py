@@ -211,5 +211,4 @@ def calculate_pitcher_metrics(landmarks_data: list) -> dict:
 
 # 開發測試用：執行 FastAPI 應用（使用 `python this_file.py` 時啟動）
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
-#如何啟動這個程式
+    uvicorn.run(app, host="0.0.0.0", port=8000)
