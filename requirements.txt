@@ -4,3 +4,4 @@ opencv-python-headless  # 無頭版，不需要GUI
 mediapipe
 numpy
 python-dotenv
+pytorchvideo
