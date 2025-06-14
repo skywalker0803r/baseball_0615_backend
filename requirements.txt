@@ -6,3 +6,5 @@ numpy
 python-dotenv
 pytorchvideo
 torch
+torchvision 
+torchaudio
