@@ -9,7 +9,6 @@ from pytorchvideo.models.hub import x3d_xs
 from tqdm import tqdm
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-import pandas as pd
 from torchvision.io import read_video
 from torchvision import transforms as T
 import cv2
