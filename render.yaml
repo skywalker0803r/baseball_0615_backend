@@ -1,0 +1,5 @@
+services:
+  - type: web
+    name: baseball_0615_backend
+    env: docker
+    plan: free
