@@ -1,6 +1,6 @@
 fastapi[all]
 uvicorn
-opencv-python-headless  # 無頭版，不需要GUI
+opencv-python-headless
 mediapipe
 numpy
 python-dotenv
