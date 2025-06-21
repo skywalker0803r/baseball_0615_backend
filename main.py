@@ -280,7 +280,7 @@ async def analyze_video_websocket(websocket: WebSocket, filename: str, record_id
         print(f"Analysis for {filename} finished.")
 
 
-# 新增 API 端點，用於獲取歷史記錄
+# 新增 API 端點，用於獲取歷史記錄 (簡要列表)
 @app.get("/api/history")
 async def get_history_records(db: Session = Depends(get_db)):
     # 獲取最近的 5 條記錄，按時間倒序排列
@@ -300,6 +300,30 @@ async def get_history_records(db: Session = Depends(get_db)):
             # 如果需要，可以為單一記錄提供一個詳細 API
         })
     return JSONResponse(content=history_data)
+
+# 新增 API 端點，用於獲取單一歷史記錄的詳細資訊 (包括 all_metrics)
+@app.get("/api/history/{record_id}")
+async def get_history_record_by_id(record_id: int, db: Session = Depends(get_db)):
+    record = db.query(AnalysisRecord).filter(AnalysisRecord.id == record_id).first()
+    if not record:
+        print('not record')
+        raise HTTPException(status_code=404, detail="Record not found")
+
+    # 從 JSON 字串解析 all_metrics 為 Python 物件
+    all_metrics_data = json.loads(record.all_metrics) if record.all_metrics else []
+    print('have record')
+    return JSONResponse(content={
+        "id": record.id,
+        "filename": record.filename,
+        "upload_time": record.upload_time.strftime("%Y-%m-%d %H:%M:%S"), # 更詳細的時間格式
+        "analysis_status": record.analysis_status,
+        "final_prediction": record.final_prediction,
+        "analysis_duration_seconds": record.analysis_duration_seconds,
+        "video_fps": record.video_fps,
+        "video_width": record.video_width,
+        "video_height": record.video_height,
+        "all_metrics": all_metrics_data # 包含已解析的指標數據
+    })
 
 # ... (運動力學指標的計算函式區塊保持不變) ...
 def get_landmark_vector(landmarks_list, idx):
