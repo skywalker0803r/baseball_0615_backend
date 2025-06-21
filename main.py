@@ -47,26 +47,37 @@ async def startup_event():
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: list[WebSocket] = []
+        self.active_connections: dict[int, WebSocket] = {} # Use record_id to manage connections
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, record_id: int):
         await websocket.accept()
-        self.active_connections.append(websocket)
-        print(f"WebSocket connected: {websocket.client}")
+        self.active_connections[record_id] = websocket
+        print(f"WebSocket connected for record_id: {record_id}")
 
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-            print(f"WebSocket disconnected: {websocket.client}")
+    def disconnect(self, record_id: int):
+        if record_id in self.active_connections:
+            print(f"WebSocket disconnected for record_id: {record_id}")
+            del self.active_connections[record_id]
         else:
-            print(f"WebSocket {websocket.client} not found in active connections.")
+            print(f"WebSocket for record_id {record_id} not found in active connections.")
 
-    async def send_personal_message(self, message: dict, websocket: WebSocket):
-        await websocket.send_json(message)
+    async def send_personal_message(self, message: dict, record_id: int):
+        websocket = self.active_connections.get(record_id)
+        if websocket:
+            try:
+                await websocket.send_json(message)
+            except RuntimeError as e:
+                print(f"Error sending message to {record_id}: {e}")
+                self.disconnect(record_id) # Clean up if connection is bad
 
     async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            await connection.send_json(message)
+        for record_id, connection in list(self.active_connections.items()): # Iterate over a copy
+            try:
+                await connection.send_json(message)
+            except RuntimeError as e:
+                print(f"Error broadcasting to {record_id}: {e}")
+                self.disconnect(record_id)
+
 
 manager = ConnectionManager()
 
@@ -119,7 +130,7 @@ async def upload_video(file: UploadFile = File(...), db: Session = Depends(get_d
 
 @app.websocket("/ws/analyze_video/{filename}/{record_id}")
 async def analyze_video_websocket(websocket: WebSocket, filename: str, record_id: int, db: Session = Depends(get_db)):
-    await manager.connect(websocket)
+    await manager.connect(websocket, record_id)
     video_path = os.path.join(UPLOAD_DIR, filename)
 
     cap = None
@@ -146,25 +157,27 @@ async def analyze_video_websocket(websocket: WebSocket, filename: str, record_id
 
     try:
         if not os.path.exists(video_path):
-            await manager.send_personal_message({"error": "Video file not found."}, websocket)
+            await manager.send_personal_message({"error": "Video file not found."}, record_id)
             current_record.analysis_status = "失敗: 檔案未找到"
             db.add(current_record)
             db.commit()
-            manager.disconnect(websocket)
+            manager.disconnect(record_id)
             return
 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            await manager.send_personal_message({"error": "Could not open video file."}, websocket)
+            await manager.send_personal_message({"error": "Could not open video file."}, record_id)
             current_record.analysis_status = "失敗: 無法開啟影片"
             db.add(current_record)
             db.commit()
-            manager.disconnect(websocket)
+            manager.disconnect(record_id)
             return
 
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
 
         # 更新資料庫中的影片元數據
         current_record.video_fps = original_fps
@@ -174,16 +187,17 @@ async def analyze_video_websocket(websocket: WebSocket, filename: str, record_id
         db.commit()
 
         await manager.send_personal_message(
-            {"video_meta": {"fps": original_fps, "width": frame_width, "height": frame_height}},
-            websocket
+            {"video_meta": {"fps": original_fps, "width": frame_width, "height": frame_height, "total_frames": total_frames}},
+            record_id
         )
 
         pose_instance = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
         frame_count = 0
         all_frames_metrics = [] # 用於收集每幀的指標數據
-        final_prediction_result = "未完成"
+        all_frames_encoded_images = [] # 用於收集每幀的圖片數據
 
+        # Process all frames
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -215,30 +229,24 @@ async def analyze_video_websocket(websocket: WebSocket, filename: str, record_id
                     elif isinstance(value, np.floating):
                         metrics[key] = float(value)
 
-            # 收集每幀的指標數據
+            # Collect metrics and image data for each frame
             all_frames_metrics.append({"frame_num": frame_count, "metrics": metrics})
 
             _, buffer = cv2.imencode('.jpg', image_bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
             encoded_image = base64.b64encode(buffer).decode('utf-8')
+            all_frames_encoded_images.append(encoded_image)
 
-            await manager.send_personal_message(
-                {
-                    "frame_num": frame_count,
-                    "image_data": encoded_image,
-                    "metrics": metrics
-                },
-                websocket
-            )
+            # Send progress update
+            if frame_count % 10 == 0 or frame_count == total_frames: # Update every 10 frames or at the end
+                progress = int((frame_count / total_frames) * 100)
+                await manager.send_personal_message({"progress": progress, "current_frame_num": frame_count}, record_id)
 
-        # 影片分析結束後
+
+        # After all frames are processed
         if all_frames_metrics:
-            # 這裡可以根據 all_frames_metrics 進行更複雜的分析或計算總體指標
-            # 目前 predict_video 函式是直接讀取影片檔案進行預測，
-            # 如果你想讓它使用 streaming 過程中收集到的數據，需要修改 predict_video 的邏輯
-            # 為了保持原有的 predict_video 函式不變，我們仍然傳遞 video_path
             final_prediction_result = predict_video(video_path)
 
-        # 更新資料庫記錄
+        # Update database record
         current_record.analysis_status = "完成"
         current_record.final_prediction = str(final_prediction_result)
         current_record.all_metrics = json.dumps(all_frames_metrics) # 儲存所有幀的指標數據
@@ -248,7 +256,15 @@ async def analyze_video_websocket(websocket: WebSocket, filename: str, record_id
         db.commit()
         print(f"Record for {current_record.filename} updated to status: {current_record.analysis_status}, ID: {current_record.id}")
 
-        await manager.send_personal_message({"final_predict": str(final_prediction_result)}, websocket)
+        # Send all collected data at once
+        await manager.send_personal_message({
+            "final_predict": str(final_prediction_result),
+            "all_frames_data": {
+                "metrics": all_frames_metrics,
+                "images": all_frames_encoded_images,
+                "video_meta": {"fps": original_fps, "width": frame_width, "height": frame_height, "total_frames": total_frames}
+            }
+        }, record_id)
 
     except WebSocketDisconnect:
         print(f"WebSocket client disconnected during analysis.")
@@ -259,7 +275,7 @@ async def analyze_video_websocket(websocket: WebSocket, filename: str, record_id
         print(f"Error during video analysis: {e}")
         import traceback
         traceback.print_exc()
-        await manager.send_personal_message({"error": f"Server error during analysis: {e}"}, websocket)
+        await manager.send_personal_message({"error": f"Server error during analysis: {e}"}, record_id)
         current_record.analysis_status = "失敗: " + str(e)[:200] # 儲存部分錯誤訊息
         db.add(current_record)
         db.commit()
@@ -276,7 +292,7 @@ async def analyze_video_websocket(websocket: WebSocket, filename: str, record_id
                 print(f"Video file {video_path} deleted successfully.")
             except Exception as e:
                 print(f"Error deleting video file {video_path}: {e}")
-        manager.disconnect(websocket)
+        manager.disconnect(record_id)
         print(f"Analysis for {filename} finished.")
 
 
